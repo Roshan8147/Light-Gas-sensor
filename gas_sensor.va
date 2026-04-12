@@ -1,0 +1,104 @@
+`include "constants.vams"
+`include "disciplines.vams"
+
+module gas( rp, rn, gasIn, vled, vss );
+
+parameter real LED_RS       = 1e3    ;
+parameter real LED_RP       = 10e6   ;
+parameter real LED_CP       = 1e-12  ;
+parameter real LED_IS       = 500e-12;
+parameter real LED_N        = 2      ;
+parameter real IRR_TP       = 75     ;
+parameter real IRR_GAIN     = 1      ;
+parameter real IRR_0        = 0.004  ;
+parameter real IRR_M        = 409    ;
+parameter real SENSOR_R0    = 2e9    ;
+parameter real SENSOR_R     = 0.5    ;
+parameter real RBASE_ALPHA  = 475    ;
+parameter real RBASE_BETA   = 0.66   ;
+parameter real GAS_GAINON   = 0.0001 ;
+parameter real GAS_GAINOFF  = 0.0001 ;
+parameter real GAS_T_IRR_OF = 500    ;
+parameter real GAS_T_IRR_M  = 0.38   ;
+parameter real GAS_R_T1T2   = 5      ;
+parameter real GAS_R_ONOFF  = 0.1    ;
+parameter real SENS_IRRS    = 0.04   ;
+parameter real SENS_IRRO    = 0.08   ;
+parameter real SENS_STD     = 1.387  ;
+parameter real DRIFT_COEF   = 80     ;
+
+input gasIn, vled, vss;
+inout rp, rn;
+
+electrical gasIn, vled, rp, rn, vss, vledA, ddt_gas_con, gas_concentration;
+
+real led_curr, irr, irr_lp, safe_irr_lp;
+real gas_gain_target, gas_tp1_target;
+real gas_gain, gas_tp1, gas_tp2, gas_f;
+real resp_EmaxS, resp_mean, resp;
+
+real Dark_Baseline;
+real Resistance_Light_Target, Resistance_Light;
+real Resistance_Gas;
+real Total_Resistance;
+
+analog begin
+    @(initial_step) begin
+        led_curr = 0; irr = IRR_0; irr_lp = IRR_0;
+        gas_gain_target = GAS_GAINON; gas_tp1_target = GAS_T_IRR_OF;
+        gas_gain = GAS_GAINON; gas_tp1 = GAS_T_IRR_OF; gas_tp2 = GAS_T_IRR_OF;
+        resp_EmaxS = 1; resp_mean = 1; resp = 1;
+        
+        Dark_Baseline = SENSOR_R0 / (1 + RBASE_ALPHA * pow(IRR_0, RBASE_BETA));
+        
+        Resistance_Light_Target = Dark_Baseline; Resistance_Light = Dark_Baseline;
+        Resistance_Gas = 0; Total_Resistance = Dark_Baseline;
+    end
+
+    I(vled, vledA) <+ V(vled,vledA) / LED_RS;
+    I(vledA,vss)   <+ V(vledA,vss) / LED_RP;
+    I(vledA,vss)   <+ LED_CP * ddt(V(vledA,vss));
+    led_curr       =  LED_IS * (exp(`P_Q*V(vledA,vss)/(LED_N*`P_K*$temperature)) - 1);
+    I(vledA,vss)   <+ led_curr;
+
+    irr = IRR_0 + IRR_M * led_curr;
+    irr_lp = laplace_nd(irr, {IRR_GAIN}, {1, IRR_TP});
+    
+    safe_irr_lp = irr_lp;
+    if (safe_irr_lp < 1e-6) safe_irr_lp = 1e-6;
+
+    Resistance_Light_Target = SENSOR_R0 / (1 + RBASE_ALPHA * pow(safe_irr_lp, RBASE_BETA));
+    Resistance_Light = transition(Resistance_Light_Target, 0, 500.0, 500.0);
+
+    if(V(gasIn, vss) > 0.5) begin
+        gas_gain_target = GAS_GAINON;
+        gas_tp1_target  = GAS_T_IRR_OF * pow(1/IRR_0, GAS_T_IRR_M);
+    end
+    else begin
+        gas_gain_target = GAS_GAINOFF;
+        gas_tp1_target  = GAS_T_IRR_OF * pow(1/IRR_0, GAS_T_IRR_M) * GAS_R_ONOFF;
+    end
+
+    gas_gain = transition(gas_gain_target, 0, 10.0, 10.0);
+    gas_tp1  = transition(gas_tp1_target,  0, 10.0, 10.0);
+    gas_tp2  = gas_tp1 / GAS_R_T1T2;
+
+    V(ddt_gas_con) <+ ddt(V(gas_concentration));
+    V(gas_concentration) <+ (gas_gain/2) * (2*ddt(V(gasIn,vss)) + V(gasIn,vss)*(gas_tp1+gas_tp2))
+                            - ddt(V(ddt_gas_con))*gas_tp1*gas_tp2
+                            - ddt(V(gas_concentration))*(gas_tp1+gas_tp2);
+
+    gas_f = V(gas_concentration, vss);
+    if (gas_f < 0) gas_f = 0;
+
+    resp_EmaxS = SENS_IRRS * gas_f + SENS_IRRO;
+    resp_mean  = ln(resp_EmaxS) + pow(SENS_STD, 2);
+    resp = gas_f * 10 * (1 / (IRR_0 * SENS_STD * sqrt(2*`M_PI))) * exp(-pow(ln(IRR_0) - resp_mean, 2) / (2 * pow(SENS_STD, 2)));
+
+    Resistance_Gas = resp * Dark_Baseline * pow(gas_f, SENSOR_R);
+
+    Total_Resistance = Resistance_Light + Resistance_Gas + (DRIFT_COEF * $abstime);
+
+    I(rp,rn) <+ V(rp,rn) / Total_Resistance;
+end
+endmodule
