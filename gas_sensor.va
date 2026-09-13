@@ -1,151 +1,305 @@
-
 `include "constants.vams"
 `include "disciplines.vams"
-
-module gas( rp, rn, gasIn, vled, vss );
-
-// User paramenters
-parameter real LED_RS       = 1e3    ; // LED series resistance
-parameter real LED_RP       = 10e6   ; // LED parallel resistance
-parameter real LED_CP       = 1e-12  ; // LED parallel cap
-parameter real LED_IS       = 500e-12; // LED reverse saturation current
-parameter real LED_N        = 2      ; // LED ideality factor
-parameter real IRR_TP       = 75     ; // Irradiance response pole (time constant)
-parameter real IRR_GAIN     = 1      ; // Irradiance gain
-parameter real IRR_0        = 0.004  ; // Ambient irradiance (W/cm^2)
-parameter real IRR_M        = 409    ; // Irradiance slope (W/(cm^2*A)) at the paper's validated 455nm LED
-parameter real SENSOR_R0    = 2e9    ; // Sensor resistance in dark conditions
-parameter real SENSOR_R     = 0.5    ; // Static response power Freundlich exponent for oxides
-parameter real RBASE_ALPHA  = 475    ; // Semiconductor base resistance parameter 
-parameter real RBASE_BETA   = 0.66   ; // Semiconductor base resistance parameter
-parameter real GAS_GAINON   = 0.0001 ; // Gas gain when increasing concentration
-parameter real GAS_GAINOFF  = 0.0001 ; // Gas gain when decreasing concentration
-parameter real GAS_T_IRR_OF = 500    ; // Gas time constant dependence with light (offset)
-parameter real GAS_T_IRR_M  = 0.38   ; // Gas time constant dependence with light (slope)
-parameter real GAS_R_T1T2   = 5      ; // Gas ratio between the two poles
-parameter real GAS_R_ONOFF  = 0.1    ; // Gas ratio between rise and fall times
-parameter real SENS_IRRS    = 0.04   ; // Irradiance slope of maximum sensitivity as function of gas conentration
-parameter real SENS_IRRO    = 0.08   ; // Irradiance offset of maximum sensitivity as function of gas concentration
-parameter real SENS_STD     = 1.387  ; // Standard deviation of the sensitivity bell shaped response
-parameter real DRIFT_COEF   = 80     ; // Drift coefficient
-
-//Wavelength parameters
-
-parameter real WAVELENGTH   = 455 from [300:1000]; 
-parameter real WL_EDGE      = 480 from [300:1000];                                                                                                                                                           
-parameter real WL_WIDTH     = 20 from (0:1000] ;                                                        
-parameter real WL_SENS_COEF = 0;   
-parameter real SENS_IRRO_FLOOR = 1e-6;    
-
-                                     
-// Input / Outputs
-
-input gasIn; // Gas input
-input vled ; // LED voltage input
-input vss  ; // Reference node
-inout rp   ; // Positive resistance contact
-inout rn   ; // Negative resistance contact
-
-electrical gasIn, vled, rp, rn, vss, vledA, ddt_gas_con, gas_concentration;
-ground gnd;
-
-real led_curr    ; // LED current
-real irr         ; // Irradiance received by the sensor from the LED
-real irr_lp      ; // Irradiance filtered
-real gas_gain    ; // Gas input gain
-real gas_tp1     ; // Gas LPF first pole (in s)
-real gas_tp2     ; // Gas LPF second pole (in s)
-real gas_edge    ; // Derivative of the gas concentration to detect the sign of the variation
-real resp_EmaxS  ; // Irradiance for which the sensitivity is maximum
-real resp_mean   ; // Mean sensitivity of the bell shaped response
-real resp        ; // Sensitivity of the sensor
-real r_base      ; // Sensor resistance due to light effects (gas ignored)
-real g_gas       ; // Conductance change due to gas presence
-real r_drift     ; // Drift resistance component
-real r_total     ; // Total sensor resistance
-real spectral_gain; // >>> SIGMOID MOD: normalized spectral responsivity at WAVELENGTH (0..1), decreasing logistic
-real sens_irro_wl ; // >>> WAVELENGTH MOD: wavelength-shifted SENS_IRRO (clamped, see FIX 2)
-
+module gas(rp, rn, gasIn, vled, vss);
+parameter real LED_RS       = 1e3;
+parameter real LED_RP       = 10e6;
+parameter real LED_CP       = 1e-12;
+parameter real LED_IS       = 500e-12;
+parameter real LED_N        = 2;
+parameter real IRR_TP       = 75;
+parameter real IRR_GAIN     = 1;
+parameter real IRR_0        = 0.004;
+parameter real IRR_M        = 409;
+parameter real SENSOR_R0    = 2e9;
+parameter real SENSOR_R     = 0.5;
+parameter real RBASE_ALPHA  = 475;
+parameter real RBASE_BETA   = 0.66;
+parameter real GAS_GAINON   = 0.0001;
+parameter real GAS_GAINOFF  = 0.0001;
+parameter real GAS_T_IRR_OF = 500;
+parameter real GAS_T_IRR_M  = 0.38;
+parameter real GAS_R_T1T2   = 5;
+parameter real GAS_R_ONOFF  = 0.1;
+parameter real SENS_IRRS    = 0.04;
+parameter real SENS_IRRO    = 0.08;
+parameter real SENS_STD     = 1.387;
+parameter real DRIFT_COEF   = 80;
+parameter real WAVELENGTH      = 455 from [300:1000];
+parameter real WL_REF          = 455;
+parameter real WL_SENS_COEF    = 0;
+parameter real SENS_IRRO_FLOOR = 1e-6;
+input gasIn;
+input vled;
+input vss;
+inout rp;
+inout rn;
+electrical gasIn;
+electrical vled;
+electrical rp;
+electrical rn;
+electrical vss;
+electrical vledA;
+electrical ddt_gas_con;
+electrical gas_concentration;
+real led_curr;
+real irr;
+real irr_lp;
+real gas_gain;
+real gas_tp1;
+real gas_tp2;
+real gas_edge;
+real resp_EmaxS;
+real resp_mean;
+real resp;
+real r_base;
+real g_gas;
+real r_drift;
+real r_total;
+real spectral_gain;
+real sens_irro_wl;
+real WL_TBL[0:65];
+real R_TBL[0:65];
+real r_at_wl;
+real r_at_ref;
+integer k;
+integer idx;
 analog begin
 
-	@(initial_step) begin
-		led_curr = 0;
-		irr = 1;
-		irr_lp = 1;
-		gas_gain = GAS_GAINON;
-		gas_tp1 = GAS_T_IRR_OF;
-		gas_tp2 = GAS_T_IRR_OF;
-		gas_edge = 0;
-		resp_EmaxS = 1;
-		resp_mean = 1;
-		resp = 1;
-		r_base = SENSOR_R0;
-		g_gas = 0;
-		r_drift = 0;
-		r_total = SENSOR_R0;
-		
-		spectral_gain = 1.0/(1.0 + exp((WAVELENGTH-WL_EDGE)/WL_WIDTH));
-		sens_irro_wl = SENS_IRRO + WL_SENS_COEF*(WAVELENGTH-WL_EDGE);  
-		if (sens_irro_wl < SENS_IRRO_FLOOR) begin
-			sens_irro_wl = SENS_IRRO_FLOOR;
-		end
-	end
+    @(initial_step) begin
 
-	// LED model
-	I(vled, vledA) <+ V(vled,vledA) / LED_RS;
-	I(vledA,vss)   <+ V(vledA,vss) / LED_RP;
-	I(vledA,vss)   <+ LED_CP * ddt(V(vledA,vss));
-	led_curr       =  LED_IS * exp(`P_Q*V(vledA,vss)/(LED_N*`P_K*$temperature));
-	I(vledA,vss)   <+ led_curr;
+        led_curr    = 0;
+        irr         = IRR_0;
+        irr_lp      = IRR_0;
+        gas_gain    = GAS_GAINON;
+        gas_tp1     = GAS_T_IRR_OF;
+        gas_tp2     = GAS_T_IRR_OF;
+        gas_edge    = 0;
+        resp_EmaxS  = 1;
+        resp_mean   = 1;
+        resp        = 1;
+        r_base      = SENSOR_R0;
+        g_gas       = 0;
+        r_drift     = 0;
+        r_total     = SENSOR_R0;
 
-	// Irradiance
-	// >>> WAVELENGTH : IRR_M scaled by spectral_gain so off-peak
-	// wavelengths produce less effective irradiance for the same LED current
-	irr = IRR_0 + IRR_M*spectral_gain*led_curr;
+        WL_TBL[0]  = 300;  R_TBL[0]  = 0.08;
+        WL_TBL[1]  = 305;  R_TBL[1]  = 0.08;
+        WL_TBL[2]  = 310;  R_TBL[2]  = 0.09;
+        WL_TBL[3]  = 315;  R_TBL[3]  = 0.09;
+        WL_TBL[4]  = 320;  R_TBL[4]  = 0.10;
+        WL_TBL[5]  = 325;  R_TBL[5]  = 0.11;
+        WL_TBL[6]  = 330;  R_TBL[6]  = 0.12;
+        WL_TBL[7]  = 335;  R_TBL[7]  = 0.14;
+        WL_TBL[8]  = 340;  R_TBL[8]  = 0.16;
+        WL_TBL[9]  = 345;  R_TBL[9]  = 0.19;
+        WL_TBL[10] = 350;  R_TBL[10] = 0.22;
+        WL_TBL[11] = 355;  R_TBL[11] = 0.26;
+        WL_TBL[12] = 360;  R_TBL[12] = 0.31;
+        WL_TBL[13] = 365;  R_TBL[13] = 0.38;
+        WL_TBL[14] = 370;  R_TBL[14] = 0.48;
+        WL_TBL[15] = 375;  R_TBL[15] = 0.62;
+        WL_TBL[16] = 380;  R_TBL[16] = 0.78;
+        WL_TBL[17] = 385;  R_TBL[17] = 0.95;
+        WL_TBL[18] = 390;  R_TBL[18] = 1.15;
+        WL_TBL[19] = 395;  R_TBL[19] = 1.32;
+        WL_TBL[20] = 400;  R_TBL[20] = 1.45;
+        WL_TBL[21] = 405;  R_TBL[21] = 1.55;
+        WL_TBL[22] = 410;  R_TBL[22] = 1.63;
+        WL_TBL[23] = 415;  R_TBL[23] = 1.70;
+        WL_TBL[24] = 420;  R_TBL[24] = 1.76;
+        WL_TBL[25] = 425;  R_TBL[25] = 1.81;
+        WL_TBL[26] = 430;  R_TBL[26] = 1.85;
+        WL_TBL[27] = 435;  R_TBL[27] = 1.88;
+        WL_TBL[28] = 440;  R_TBL[28] = 1.91;
+        WL_TBL[29] = 445;  R_TBL[29] = 1.93;
+        WL_TBL[30] = 450;  R_TBL[30] = 1.95;
+        WL_TBL[31] = 455;  R_TBL[31] = 1.96;
+        WL_TBL[32] = 460;  R_TBL[32] = 1.97;
+        WL_TBL[33] = 465;  R_TBL[33] = 1.98;
+        WL_TBL[34] = 470;  R_TBL[34] = 1.99;
+        WL_TBL[35] = 475;  R_TBL[35] = 1.99;
+        WL_TBL[36] = 480;  R_TBL[36] = 2.00;
+        WL_TBL[37] = 485;  R_TBL[37] = 2.00;
+        WL_TBL[38] = 490;  R_TBL[38] = 2.00;
+        WL_TBL[39] = 495;  R_TBL[39] = 2.00;
+        WL_TBL[40] = 500;  R_TBL[40] = 2.01;
+        WL_TBL[41] = 510;  R_TBL[41] = 2.01;
+        WL_TBL[42] = 520;  R_TBL[42] = 2.02;
+        WL_TBL[43] = 530;  R_TBL[43] = 2.02;
+        WL_TBL[44] = 540;  R_TBL[44] = 2.03;
+        WL_TBL[45] = 550;  R_TBL[45] = 2.03;
+        WL_TBL[46] = 560;  R_TBL[46] = 2.04;
+        WL_TBL[47] = 570;  R_TBL[47] = 2.04;
+        WL_TBL[48] = 580;  R_TBL[48] = 2.04;
+        WL_TBL[49] = 590;  R_TBL[49] = 2.04;
+        WL_TBL[50] = 600;  R_TBL[50] = 2.05;
+        WL_TBL[51] = 610;  R_TBL[51] = 2.05;
+        WL_TBL[52] = 620;  R_TBL[52] = 2.05;
+        WL_TBL[53] = 630;  R_TBL[53] = 2.05;
+        WL_TBL[54] = 640;  R_TBL[54] = 2.05;
+        WL_TBL[55] = 650;  R_TBL[55] = 2.05;
+        WL_TBL[56] = 660;  R_TBL[56] = 2.05;
+        WL_TBL[57] = 670;  R_TBL[57] = 2.05;
+        WL_TBL[58] = 680;  R_TBL[58] = 2.05;
+        WL_TBL[59] = 690;  R_TBL[59] = 2.05;
 
-	// Irradiance low pass filter (changes in the semiconductor are not instant)
-	irr_lp = laplace_nd(irr, {IRR_GAIN}, {1,IRR_TP});
+        WL_TBL[60] = 700;  R_TBL[60] = 2.05;
+        WL_TBL[61] = 710;  R_TBL[61] = 2.05;
+        WL_TBL[62] = 720;  R_TBL[62] = 2.05;
+        WL_TBL[63] = 730;  R_TBL[63] = 2.05;
+        WL_TBL[64] = 740;  R_TBL[64] = 2.05;
+        WL_TBL[65] = 750;  R_TBL[65] = 2.05;
+        if (WAVELENGTH <= WL_TBL[0]) begin
+            r_at_wl = R_TBL[0];
+        end
+        else if (WAVELENGTH >= WL_TBL[65]) begin
+            r_at_wl = R_TBL[65];
+        end
+        else begin
+            idx = 0;
+            for (k = 0; k < 65; k = k + 1) begin
+                if ((WAVELENGTH >= WL_TBL[k]) && (WAVELENGTH <= WL_TBL[k+1])) begin
+                    idx = k;
+                end
+            end
+            r_at_wl = R_TBL[idx]
+                + (R_TBL[idx+1] - R_TBL[idx])
+                * (WAVELENGTH - WL_TBL[idx])
+                / (WL_TBL[idx+1] - WL_TBL[idx]);
+        end
+        if (WL_REF <= WL_TBL[0]) begin
+            r_at_ref = R_TBL[0];
+        end
+        else if (WL_REF >= WL_TBL[65]) begin
+            r_at_ref = R_TBL[65];
+        end
+        else begin
+            idx = 0;
+            for (k = 0; k < 65; k = k + 1) begin
+                if ((WL_REF >= WL_TBL[k]) && (WL_REF <= WL_TBL[k+1])) begin
+                    idx = k;
+                end
+            end
+            r_at_ref = R_TBL[idx]
+                + (R_TBL[idx+1] - R_TBL[idx])
+                * (WL_REF - WL_TBL[idx])
+                / (WL_TBL[idx+1] - WL_TBL[idx]);
+        end
 
-	// Light effects on sensor resistance
-	r_base = (SENSOR_R0 / (1 + RBASE_ALPHA*irr_lp**RBASE_BETA));
+        spectral_gain = r_at_ref / r_at_wl;
+        sens_irro_wl =
+            SENS_IRRO
+            + WL_SENS_COEF * (WAVELENGTH - WL_REF);
 
-	// Gas low pass filter (reactions are slow, multiexponential and assymetrical)
-	gas_edge = ddt(V(gasIn,vss)); // finds the derivative in order to know if the concentration is increasing or decreasing
-	if(gas_edge > 0.1) begin // gas concentration increasing
-		gas_gain = GAS_GAINON;
-		gas_tp1  = GAS_T_IRR_OF*(1/irr)**GAS_T_IRR_M;
-	end
-	else if(gas_edge < -0.1) begin // gas concentration decreasing
-		gas_gain = GAS_GAINOFF;
-		gas_tp1  = GAS_T_IRR_OF*(1/irr)**GAS_T_IRR_M *GAS_R_ONOFF;
-	end
-	else begin
-		gas_gain = gas_gain;
-		gas_tp1  = gas_tp1;
-	end
-	gas_tp2 = gas_tp1/GAS_R_T1T2;
+        if (sens_irro_wl < SENS_IRRO_FLOOR) begin
+            sens_irro_wl = SENS_IRRO_FLOOR;
+        end
 
-	// Multi exponential slews
-	V(ddt_gas_con) <+ ddt(V(gas_concentration)); // Second derivative
-	V(gas_concentration) <+ gas_gain/2*(2*ddt(V(gasIn,vss))+V(gasIn,vss)*(gas_tp1+gas_tp2)) - ddt(V(ddt_gas_con))*gas_tp1*gas_tp2 - ddt(V(gas_concentration))*(gas_tp1+gas_tp2);
+    end
+    I(vled, vledA) <+ V(vled, vledA) / LED_RS;
+    I(vledA, vss) <+ V(vledA, vss) / LED_RP;
+    I(vledA, vss) <+
+        LED_CP * ddt(V(vledA, vss));
+    led_curr =
+        LED_IS
+        * exp(
+            `P_Q * V(vledA, vss)
+            / (LED_N * `P_K * $temperature)
+        );
 
-	// Sensitivity
-	// >>> WAVELENGTH MOD: SENS_IRRO replaced with sens_irro_wl (now clamped, see FIX 2)
-	resp_EmaxS = SENS_IRRS*V(gas_concentration,vss)+sens_irro_wl;
-	resp_mean = ln(resp_EmaxS) + SENS_STD**2;
-	resp = V(gas_concentration,vss)*10*1/(irr_lp * SENS_STD * sqrt(2*`M_PI))*exp(-((ln(irr_lp)-resp_mean)**2)/(2*SENS_STD**2));
+    I(vledA, vss) <+ led_curr;
+    irr =
+        IRR_0
+        + IRR_M * spectral_gain * led_curr;
+    irr_lp =
+        laplace_nd(
+            irr,
+            {IRR_GAIN},
+            {1, IRR_TP}
+        );
+    r_base =
+        SENSOR_R0
+        / (1 + RBASE_ALPHA * irr_lp**RBASE_BETA);
+    gas_edge =
+        ddt(V(gasIn, vss));
+    if (gas_edge > 0.1) begin
 
-	// Conductance variance due to gas presence
-	g_gas = 1/resp/r_base * pow(V(gas_concentration,vss), SENSOR_R);
+        gas_gain = GAS_GAINON;
 
-	// Drift term
-	r_drift = DRIFT_COEF*$abstime;
+        gas_tp1 =
+            GAS_T_IRR_OF
+            * (1 / irr)**GAS_T_IRR_M;
 
-	// Total resistance
-	r_total = r_base + 1/g_gas + r_drift;
+    end
+    else if (gas_edge < -0.1) begin
 
-	// Output current proportional to the sensor resistance
-	I(rp,rn) <+ V(rp,rn)/r_total;
+        gas_gain = GAS_GAINOFF;
+
+        gas_tp1 =
+            GAS_T_IRR_OF
+            * (1 / irr)**GAS_T_IRR_M
+            * GAS_R_ONOFF;
+
+    end
+    else begin
+        gas_gain = gas_gain;
+        gas_tp1  = gas_tp1;
+    end
+
+    gas_tp2 =
+        gas_tp1 / GAS_R_T1T2;
+    V(ddt_gas_con) <+
+        ddt(V(gas_concentration));
+
+    V(gas_concentration) <+
+        gas_gain / 2
+        * (
+            2 * ddt(V(gasIn, vss))
+            + V(gasIn, vss) * (gas_tp1 + gas_tp2)
+        )
+        - ddt(V(ddt_gas_con))
+        * gas_tp1
+        * gas_tp2
+        - ddt(V(gas_concentration))
+        * (gas_tp1 + gas_tp2);
+    resp_EmaxS =
+        SENS_IRRS
+        * V(gas_concentration, vss)
+        + sens_irro_wl;
+
+    resp_mean =
+        ln(resp_EmaxS)
+        + SENS_STD**2;
+
+    resp =
+        V(gas_concentration, vss)
+        * 10
+        / (
+            irr_lp
+            * SENS_STD
+            * sqrt(2 * `M_PI)
+        )
+        * exp(
+            -(
+                (ln(irr_lp) - resp_mean)**2
+            )
+            / (2 * SENS_STD**2)
+        );
+    g_gas =
+        1 / resp
+        / r_base
+        * pow(
+            V(gas_concentration, vss),
+            SENSOR_R
+        );
+    r_drift =
+        DRIFT_COEF * $abstime;
+    r_total =
+        r_base
+        + 1 / g_gas
+        + r_drift;
+    I(rp, rn) <+
+        V(rp, rn) / r_total;
+
 end
-
 endmodule
